@@ -31,6 +31,7 @@ from inference.model_generator.deploy_cmds import *  # noqa: E402
 from inference.model_generator.layers.add_pack import AddLayer  # noqa: E402
 from inference.model_generator.layers.avgpool2d_layer import Avgpool2DLayer  # noqa: E402
 from inference.model_generator.layers.mult_scaler import MultScalarLayer  # noqa: E402
+from inference.model_generator.layers.softmax_layer import SoftmaxLayer  # noqa: E402
 from training.model_export.onnx_to_json import *  # noqa: E402
 
 
@@ -190,6 +191,89 @@ class TestLayerExport(unittest.TestCase):
                 input_args=input_args,
                 output_args=[Argument('output_ct', output_ct)],
                 output_instruction_path=base_path / f'CKKS_square_{s}_{s}' / f'level_{n_in_level}' / 'server',
+            )
+
+    def test_softmax(self):
+        set_param('PN14QP438')
+        n_in_level = 8
+        n_channel = 16
+        n_channel_per_ct = 16
+
+        input_ct = [CkksCiphertextNode(f'input_ct_{i}', n_in_level) for i in range(1)]
+
+        exp_range = [-2.0, 2.0]
+        exp_degree = 7
+        inv_range = [5.0, 50.0]
+        inv_degree = 7
+
+        softmax = SoftmaxLayer(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct)
+        output_ct = softmax.call(input_ct)
+
+        input_args = [Argument('input_node', input_ct)]
+        poly_data_source = CkksPlaintextRingtNode('poly_data_source')
+
+        process_custom_task(
+            input_args=input_args,
+            output_args=[Argument('output_ct', output_ct)],
+            output_instruction_path=base_path / f'CKKS_softmax_{n_channel}' / f'level_{n_in_level}' / 'server',
+        )
+
+    def test_softmax_range_sweep(self):
+        set_param('PN14QP438')
+        n_channel = 16
+        n_channel_per_ct = 16
+        exp_degree = 7
+        inv_degree = 7
+
+        test_configs = [
+            {
+                'name': 'range_minus_0.5_to_0.5',
+                'input_range': (-0.5, 0.5),
+                'exp_range': [-1.0, 1.0],
+                'inv_range': [5.0, 30.0],
+                'level': 8
+            },
+            {
+                'name': 'range_minus_1.0_to_1.0',
+                'input_range': (-1.0, 1.0),
+                'exp_range': [-2.0, 2.0],
+                'inv_range': [5.0, 50.0],
+                'level': 8
+            },
+            {
+                'name': 'range_minus_1.5_to_1.5',
+                'input_range': (-1.5, 1.5),
+                'exp_range': [-2.5, 2.5],
+                'inv_range': [3.0, 80.0],
+                'level': 10
+            },
+            {
+                'name': 'range_minus_2.0_to_2.0',
+                'input_range': (-2.0, 2.0),
+                'exp_range': [-3.0, 3.0],
+                'inv_range': [2.0, 130.0],
+                'level': 12
+            },
+        ]
+
+        for config in test_configs:
+            print(f"\n=== Testing Softmax with input range {config['input_range']} ===")
+            n_in_level = config['level']
+            exp_range = config['exp_range']
+            inv_range = config['inv_range']
+
+            input_ct = [CkksCiphertextNode(f'input_ct_{i}', n_in_level) for i in range(1)]
+
+            softmax = SoftmaxLayer(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct)
+            output_ct = softmax.call(input_ct)
+
+            input_args = [Argument('input_node', input_ct)]
+
+            task_name = f"CKKS_softmax_{config['name']}_{n_channel}"
+            process_custom_task(
+                input_args=input_args,
+                output_args=[Argument('output_ct', output_ct)],
+                output_instruction_path=base_path / task_name / f'level_{n_in_level}' / 'server',
             )
 
     def test_conv2d_packed(self):
@@ -1130,7 +1214,7 @@ class TestLayerExport(unittest.TestCase):
                             channel=n_channel,
                             skip=[1, 1],
                         )
-                        output_ct = avgpool.call_interleaved_avgpool(input_ct, block_expansion)
+                        output_ct = avgpool.call_interleaved_avgpool(input_ct, block_expansion, N)
 
                         input_args = [Argument('input_node', input_ct)]
                         process_custom_task(

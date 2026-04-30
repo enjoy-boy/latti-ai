@@ -53,6 +53,7 @@
 #include "fhe_layers/avgpool2d_layer.h"
 #include "fhe_layers/concat_layer.h"
 #include "fhe_layers/mult_scaler.h"
+#include "fhe_layers/softmax_layer.h"
 #include "fhe_layers/upsample_layer.h"
 #include "fhe_layers/upsample_nearest_layer.h"
 #include "ut_util.h"
@@ -134,7 +135,7 @@ struct SharedHeteroResources {
         static SharedHeteroResources instance;
         return instance;
     }
-    const int N = 16384;
+    const int N = 32768;
     const int n_slot = N / 2;
     CkksParameter param;
     CkksContext context;
@@ -146,6 +147,14 @@ private:
     }
     SharedHeteroResources(const SharedHeteroResources&) = delete;
     SharedHeteroResources& operator=(const SharedHeteroResources&) = delete;
+};
+
+struct SoftmaxTestConfig {
+    std::string name;
+    double input_range_scale;
+    int init_level;
+    std::array<double, 2> exp_range;
+    std::array<double, 2> inv_range;
 };
 
 template <typename T> class HeteroFixture {
@@ -193,6 +202,96 @@ public:
         return result;
     }
 
+    void run_softmax_test(SoftmaxTestConfig config, int n_channel) {
+        Array<double, 1> input_array = gen_random_array<1>({(uint64_t)n_channel}, config.input_range_scale);
+
+        int exp_degree = 7;
+        int inv_degree = 7;
+
+        SoftmaxLayer softmax(config.exp_range, exp_degree, config.inv_range, inv_degree);
+
+        Feature0DEncrypted input_feature(&context, config.init_level);
+        input_feature.n_channel = n_channel;
+        input_feature.n_channel_per_ct = n_channel;
+        input_feature.pack(input_array, false, param.get_default_scale());
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        Feature0DEncrypted output_feature = softmax.run(context, input_feature);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+        TaskMetrics metrics;
+        metrics.test_name = "softmax_layer_" + config.name;
+        metrics.task_config = "n_channel_" + std::to_string(n_channel);
+        metrics.n = N;
+        metrics.processor_type = "CPU";
+        metrics.execution_time_ms = duration.count();
+        MetricsCollector::add_metrics(metrics);
+
+        Array<double, 1> result = output_feature.unpack();
+        Array<double, 1> expected = softmax.run_plaintext(input_array);
+
+        std::cout << "\n========== Softmax Layer Test: " << config.name << " ==========\n";
+        std::cout << "Input range: [-" << config.input_range_scale << ", " << config.input_range_scale << "]\n";
+        std::cout << std::setw(5) << "Idx"
+                  << std::setw(15) << "Input"
+                  << std::setw(15) << "Expected"
+                  << std::setw(15) << "Actual"
+                  << std::setw(15) << "Error"
+                  << std::setw(15) << "RelError%" << std::endl;
+        std::cout << "--------------------------------------------------------------\n";
+
+        double max_error = 0.0;
+        int max_error_idx = -1;
+        double max_abs = 0.0;
+        double sum_sq_error = 0.0;
+        double sum_sq_expected = 0.0;
+
+        for (int i = 0; i < n_channel; i++) {
+            double input_val = input_array[i];
+            double expected_val = expected[i];
+            double actual_val = result[i];
+            double error = std::abs(expected_val - actual_val);
+            double rel_error = (expected_val != 0) ? (error / std::abs(expected_val) * 100) :
+                               (actual_val != 0 ? 100 : 0);
+
+            sum_sq_error += error * error;
+            sum_sq_expected += expected_val * expected_val;
+
+            if (error > max_error) {
+                max_error = error;
+                max_error_idx = i;
+            }
+            if (std::abs(expected_val) > max_abs) {
+                max_abs = std::abs(expected_val);
+            }
+
+            std::cout << std::setw(5) << i
+                      << std::setw(15) << std::fixed << std::setprecision(6) << input_val
+                      << std::setw(15) << expected_val
+                      << std::setw(15) << actual_val
+                      << std::setw(15) << error
+                      << std::setw(14) << std::setprecision(2) << rel_error << "%" << std::endl;
+        }
+
+        std::cout << "--------------------------------------------------------------\n";
+        double rmse = std::sqrt(sum_sq_error / n_channel);
+        double rms = std::sqrt(sum_sq_expected / n_channel);
+
+        std::cout << "Statistics:\n";
+        std::cout << "  max_error=" << max_error << " at index[" << max_error_idx << "]\n";
+        std::cout << "  max_abs=" << max_abs << std::endl;
+        std::cout << "  rmse=" << rmse << std::endl;
+        std::cout << "  rms=" << rms << std::endl;
+        std::cout << "  max_error/max_abs=" << (max_error / max_abs * 100) << "%\n";
+        std::cout << "  rmse/rms=" << (rmse / rms * 100) << "%\n";
+        std::cout << "==============================================================\n\n";
+
+        auto compare_result = compare(expected, result);
+        REQUIRE(compare_result.max_error < 0.30 * compare_result.max_abs);
+        REQUIRE(compare_result.rmse < 0.30 * compare_result.rms);
+    }
+
 protected:
     int N;
     int n_slot;
@@ -222,7 +321,7 @@ TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "sq", "", HeteroProcessors) {
             Feature2DEncrypted input_feature(&this->context, init_level);
             input_feature.pack_multiple_channel(input_array, false, this->param.get_default_scale());
 
-            Feature2DEncrypted output_feature(&this->context, init_level);
+            Feature2DEncrypted output_feature(&this->context, init_level - 1);
 
             for (int i = 0; i < 1; i++) {
                 output_feature.data.push_back(
@@ -2617,3 +2716,141 @@ TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "upsample_nearest_layer", "", Hete
         run_upsample_nearest_test(4, 8);
     }
 }
+
+TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "softmax_layer", "", HeteroProcessors) {
+    int n_channel = 16;
+
+    std::vector<SoftmaxTestConfig> test_configs = {
+        {
+            "range_0.5",
+            0.5,
+            12,
+            {-1.0, 1.0},
+            {5.0, 30.0}
+        },
+        {
+            "range_1.0",
+            1.0,
+            12,
+            {-2.0, 2.0},
+            {5.0, 50.0}
+        },
+        {
+            "range_1.5",
+            1.5,
+            12,
+            {-2.5, 2.5},
+            {3.0, 80.0}
+        },
+        {
+            "range_2.0",
+            2.0,
+            12,
+            {-3.0, 3.0},
+            {2.0, 130.0}
+        },
+    };
+
+    for (auto& config : test_configs) {
+        SECTION("input_scale=" + config.name) {
+            this->run_softmax_test(config, n_channel);
+        }
+    }
+}
+
+TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "softmax_layer_single", "", HeteroProcessors) {
+    int n_channel = 16;
+    int init_level = 12;
+
+    Array<double, 1> input_array = gen_random_array<1>({(uint64_t)n_channel}, 1.0);
+
+    std::array<double, 2> exp_range = {-2.0, 2.0};
+    int exp_degree = 7;
+    std::array<double, 2> inv_range = {5.0, 50.0};
+    int inv_degree = 7;
+
+    SoftmaxLayer softmax(exp_range, exp_degree, inv_range, inv_degree);
+
+    Feature0DEncrypted input_feature(&this->context, init_level);
+    input_feature.n_channel = n_channel;
+    input_feature.n_channel_per_ct = n_channel;
+    input_feature.pack(input_array, false, this->param.get_default_scale());
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    Feature0DEncrypted output_feature = softmax.run(this->context, input_feature);
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    TaskMetrics metrics;
+    metrics.test_name = "softmax_layer";
+    metrics.task_config = "n_channel_" + std::to_string(n_channel);
+    metrics.n = this->N;
+    metrics.processor_type = "CPU";
+    metrics.execution_time_ms = duration.count();
+    MetricsCollector::add_metrics(metrics);
+
+    Array<double, 1> result = output_feature.unpack();
+    Array<double, 1> expected = softmax.run_plaintext(input_array);
+
+    std::cout << "\n========== Softmax Layer Detailed Comparison ==========\n";
+    std::cout << std::setw(5) << "Idx"
+              << std::setw(15) << "Input"
+              << std::setw(15) << "Expected"
+              << std::setw(15) << "Actual"
+              << std::setw(15) << "Error"
+              << std::setw(15) << "RelError%" << std::endl;
+    std::cout << "--------------------------------------------------------------\n";
+
+    double max_error = 0.0;
+    int max_error_idx = -1;
+    double max_abs = 0.0;
+    double sum_sq_error = 0.0;
+    double sum_sq_expected = 0.0;
+
+    for (int i = 0; i < n_channel; i++) {
+        double input_val = input_array[i];
+        double expected_val = expected[i];
+        double actual_val = result[i];
+        double error = std::abs(expected_val - actual_val);
+        double rel_error = (expected_val != 0) ? (error / std::abs(expected_val) * 100) :
+                           (actual_val != 0 ? 100 : 0);
+
+        sum_sq_error += error * error;
+        sum_sq_expected += expected_val * expected_val;
+
+        if (error > max_error) {
+            max_error = error;
+            max_error_idx = i;
+        }
+        if (std::abs(expected_val) > max_abs) {
+            max_abs = std::abs(expected_val);
+        }
+
+        std::cout << std::setw(5) << i
+                  << std::setw(15) << std::fixed << std::setprecision(6) << input_val
+                  << std::setw(15) << expected_val
+                  << std::setw(15) << actual_val
+                  << std::setw(15) << error
+                  << std::setw(14) << std::setprecision(2) << rel_error << "%" << std::endl;
+    }
+
+    std::cout << "--------------------------------------------------------------\n";
+    double rmse = std::sqrt(sum_sq_error / n_channel);
+    double rms = std::sqrt(sum_sq_expected / n_channel);
+
+    std::cout << "Statistics:\n";
+    std::cout << "  max_error=" << max_error << " at index[" << max_error_idx << "]\n";
+    std::cout << "  max_abs=" << max_abs << std::endl;
+    std::cout << "  rmse=" << rmse << std::endl;
+    std::cout << "  rms=" << rms << std::endl;
+    std::cout << "  max_error/max_abs=" << (max_error / max_abs * 100) << "%\n";
+    std::cout << "  rmse/rms=" << (rmse / rms * 100) << "%\n";
+    std::cout << "==============================================================\n\n";
+
+    auto compare_result = compare(expected, result);
+
+    REQUIRE(compare_result.max_error < 0.30 * compare_result.max_abs);
+    REQUIRE(compare_result.rmse < 0.30 * compare_result.rms);
+}
+
+
