@@ -23,27 +23,28 @@
 using namespace std;
 using namespace cxx_sdk_v2;
 
-SoftmaxLayer::SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree, 
-                           const std::array<double, 2>& inv_range, int inv_degree)
-    : exp_range_(exp_range), exp_degree_(exp_degree), 
-      inv_range_(inv_range), inv_degree_(inv_degree) {}
+SoftmaxLayer::SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree,
+                           const std::array<double, 2>& inv_range, int inv_degree,
+                           int n_channel, int n_channel_per_ct)
+    : exp_range_(exp_range), exp_degree_(exp_degree),
+      inv_range_(inv_range), inv_degree_(inv_degree),
+      n_channel_(n_channel), n_channel_per_ct_(n_channel_per_ct) {
+    n_slots_ = std::min(n_channel, n_channel_per_ct);
+}
 
 SoftmaxLayer::~SoftmaxLayer() {}
 
-ls::CkksCiphertext SoftmaxLayer::sum_slots(ls::CkksContext& ctx, const ls::CkksCiphertext& x, int n_slots) {
+ls::CkksCiphertext SoftmaxLayer::sum_slots(ls::CkksContext& ctx, const ls::CkksCiphertext& x) {
     int total_slots = ctx.get_parameter().get_n() / 2;
-    
-    // 1. Mask the ciphertext to keep only the first n_slots
-    // This is important because slots beyond n_slots might contain noise or other data
+
     vector<double> mask(total_slots, 0.0);
-    for (int i = 0; i < n_slots; ++i) {
+    for (int i = 0; i < n_slots_; ++i) {
         mask[i] = 1.0;
     }
     ls::CkksPlaintext pt_mask = ctx.encode(mask, x.get_level(), x.get_scale());
     ls::CkksCiphertext masked_x = ctx.mult_plain(x, pt_mask);
     masked_x = ctx.rescale(masked_x, x.get_scale());
 
-    // 2. All-sum rotation
     ls::CkksCiphertext res = masked_x.copy();
     for (int i = 1; i < total_slots; i <<= 1) {
         res = ctx.add(res, ctx.rotate(res, i));
@@ -71,10 +72,6 @@ Feature0DEncrypted SoftmaxLayer::run(ls::CkksContext& ctx, const Feature0DEncryp
         throw std::runtime_error("SoftmaxLayer: input level too low. Need at least " + to_string(total_depth));
     }
 
-    // For Feature0D, we sum across the packed channels in each ciphertext.
-    // If n_channel < n_channel_per_ct, we only sum n_channel slots.
-    int n_slots = std::min((int)x.n_channel, (int)x.n_channel_per_ct);
-    
     // 1. Approximate exp(x)
     parallel_for(x.data.size(), th_nums, ctx, [&](ls::CkksContext& ctx_copy, int i) {
         // exp(x) approximation
@@ -83,7 +80,7 @@ Feature0DEncrypted SoftmaxLayer::run(ls::CkksContext& ctx, const Feature0DEncryp
             x.data[i], exp_range_[0], exp_range_[1], exp_degree_);
         
         // 2. Sum exp(x_j)
-        ls::CkksCiphertext sum_exp = sum_slots(ctx_copy, exp_x, n_slots);
+        ls::CkksCiphertext sum_exp = sum_slots(ctx_copy, exp_x);
         
         // 3. Approximate 1/sum
         ls::CkksCiphertext inv_sum = ctx_copy.poly_eval_function(

@@ -38,9 +38,12 @@ public:
      * @param exp_degree Degree of the polynomial for exp(x).
      * @param inv_range Range [min, max] for 1/x approximation.
      * @param inv_degree Degree of the polynomial for 1/x.
+     * @param n_channel Number of channels in the input.
+     * @param n_channel_per_ct Number of channels packed per ciphertext.
      */
-    SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree, 
-                 const std::array<double, 2>& inv_range, int inv_degree);
+    SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree,
+                 const std::array<double, 2>& inv_range, int inv_degree,
+                 int n_channel, int n_channel_per_ct);
 
     virtual ~SoftmaxLayer();
 
@@ -62,9 +65,12 @@ private:
     int exp_degree_;
     std::array<double, 2> inv_range_;
     int inv_degree_;
+    int n_channel_;
+    int n_channel_per_ct_;
+    int n_slots_;
 
     /**
      * @brief Sum elements in a ciphertext across slots.
      */
-    ls::CkksCiphertext sum_slots(ls::CkksContext& ctx, const ls::CkksCiphertext& x, int n_slots);
+    ls::CkksCiphertext sum_slots(ls::CkksContext& ctx, const ls::CkksCiphertext& x);
 };
