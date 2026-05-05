@@ -46,19 +46,22 @@ def compute_standard_poly_coeffs(func, degree: int, a: float, b: float):
 
 
 class SoftmaxLayer:
-    def __init__(self, exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct):
+    def __init__(self, exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct, temperature=1.0):
         self.exp_range = exp_range
         self.exp_degree = exp_degree
         self.inv_range = inv_range
         self.inv_degree = inv_degree
         self.n_channel = n_channel
         self.n_channel_per_ct = n_channel_per_ct
+        self.temperature = temperature
 
         self.n_slots = min(n_channel, n_channel_per_ct)
 
         self.exp_depth = compute_poly_depth(self.exp_degree)
         self.inv_depth = compute_poly_depth(self.inv_degree)
         self.total_depth = self.exp_depth + self.inv_depth + 4
+        if self.temperature != 1.0:
+            self.total_depth += 1
 
         self.plaintext_nodes = []
 
@@ -183,7 +186,15 @@ class SoftmaxLayer:
             if ct.level < self.total_depth:
                 raise RuntimeError(f"SoftmaxLayer: input level too low. Need at least {self.total_depth}, got {ct.level}")
 
-            exp_ct = self._eval_exp_poly(ct, f'{prefix}_exp')
+            if self.temperature != 1.0:
+                temp_node = CkksPlaintextRingtNode(f'{prefix}_temp')
+                self.plaintext_nodes.append(temp_node)
+                scaled_ct = mult(ct, temp_node, output_id=f'{prefix}_temp_mult')
+                scaled_ct = rescale(scaled_ct, output_id=f'{prefix}_temp_rescale')
+            else:
+                scaled_ct = ct
+
+            exp_ct = self._eval_exp_poly(scaled_ct, f'{prefix}_exp')
             sum_exp = self._sum_slots(exp_ct, self.n_slots, prefix=f'{prefix}_sum')
             inv_sum = self._eval_inv_poly(sum_exp, f'{prefix}_inv')
 
@@ -205,6 +216,11 @@ class SoftmaxLayer:
         return self.call(x)
 
     def get_plaintext_values(self, n_total_slots: int):
+        values = []
+
+        if self.temperature != 1.0:
+            values.append([1.0 / self.temperature] * n_total_slots)
+
         a_exp, b_exp = self.exp_range
         exp_func_mapped = lambda x_prime, a=a_exp, b=b_exp: np.exp((b - a) / 2 * x_prime + (a + b) / 2)
         exp_coeffs = compute_standard_poly_coeffs(exp_func_mapped, self.exp_degree, -1.0, 1.0)
@@ -221,7 +237,6 @@ class SoftmaxLayer:
         for i in range(self.n_slots):
             mask_values[i] = 1.0
 
-        values = []
         values.append([exp_alpha] * n_total_slots)
         values.append([exp_beta] * n_total_slots)
         for c in exp_coeffs:

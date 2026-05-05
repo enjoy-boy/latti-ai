@@ -20,9 +20,10 @@ echo "==== Compiling C++ Unit Tests ===="
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make test_fhe_layers_hetero -j$(nproc)
+cd "$PROJECT_ROOT"
 
 # 4. 运行 C++ 算子推理单元测试
 echo "==== Running C++ Softmax Tests ===="
-./inference/unittests/test_fhe_layers_hetero "*softmax_layer*"
+./build/inference/unittests/test_fhe_layers_hetero "*softmax_layer*"
 
 echo "==== All Softmax Tests Completed Successfully ===="

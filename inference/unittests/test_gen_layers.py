@@ -206,29 +206,57 @@ class TestLayerExport(unittest.TestCase):
                 'input_range': (-0.5, 0.5),
                 'exp_range': [-1.0, 1.0],
                 'inv_range': [5.0, 30.0],
-                'level': 12
+                'level': 12,
+                'temperature': 1.0
             },
             {
                 'name': 'range_1.0',
                 'input_range': (-1.0, 1.0),
                 'exp_range': [-2.0, 2.0],
                 'inv_range': [5.0, 50.0],
-                'level': 12
+                'level': 12,
+                'temperature': 1.0
             },
             {
-                'name': 'range_1.5',
+                'name': 'range_1.5_T1.5',
                 'input_range': (-1.5, 1.5),
-                'exp_range': [-2.5, 2.5],
-                'inv_range': [3.0, 80.0],
-                'level': 12
+                'exp_range': [-1.0, 1.0],
+                'inv_range': [5.0, 30.0],
+                'level': 12,
+                'temperature': 1.5
             },
             {
-                'name': 'range_2.0',
+                'name': 'range_2.0_T1',
                 'input_range': (-2.0, 2.0),
-                'exp_range': [-3.0, 3.0],
-                'inv_range': [2.0, 130.0],
-                'level': 12
+                'exp_range': [-2.0, 2.0],
+                'inv_range': [2.0, 120.0],
+                'level': 12,
+                'temperature': 1.0
             },
+            {
+                'name': 'range_2.0_T2',
+                'input_range': (-2.0, 2.0),
+                'exp_range': [-1.0, 1.0],
+                'inv_range': [5.0, 30.0],
+                'level': 12,
+                'temperature': 2.0
+            },
+            {
+                'name': 'range_8.0_T1',
+                'input_range': (-8.0, 8.0),
+                'exp_range': [-8.0, 8.0],
+                'inv_range': [0.001, 50000.0],
+                'level': 12,
+                'temperature': 1.0
+            },
+            {
+                'name': 'range_8.0_T8',
+                'input_range': (-8.0, 8.0),
+                'exp_range': [-1.0, 1.0],
+                'inv_range': [5.0, 30.0],
+                'level': 12,
+                'temperature': 8.0
+            }
         ]
 
         for config in test_configs:
@@ -236,10 +264,11 @@ class TestLayerExport(unittest.TestCase):
             n_in_level = config['level']
             exp_range = config['exp_range']
             inv_range = config['inv_range']
+            temperature = config['temperature']
 
             input_ct = [CkksCiphertextNode(f'input_ct_{i}', n_in_level) for i in range(1)]
 
-            softmax = SoftmaxLayer(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct)
+            softmax = SoftmaxLayer(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel_per_ct, temperature)
             output_ct = softmax.call(input_ct)
 
             input_args = [Argument('input_node', input_ct)]

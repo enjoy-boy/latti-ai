@@ -25,10 +25,11 @@ using namespace cxx_sdk_v2;
 
 SoftmaxLayer::SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree,
                            const std::array<double, 2>& inv_range, int inv_degree,
-                           int n_channel, int n_channel_per_ct)
+                           int n_channel, int n_channel_per_ct, double temperature)
     : exp_range_(exp_range), exp_degree_(exp_degree),
       inv_range_(inv_range), inv_degree_(inv_degree),
-      n_channel_(n_channel), n_channel_per_ct_(n_channel_per_ct) {
+      n_channel_(n_channel), n_channel_per_ct_(n_channel_per_ct),
+      temperature_(temperature) {
     n_slots_ = std::min(n_channel, n_channel_per_ct);
 }
 
@@ -67,17 +68,28 @@ Feature0DEncrypted SoftmaxLayer::run(ls::CkksContext& ctx, const Feature0DEncryp
     int exp_depth = compute_poly_depth(exp_degree_);
     int inv_depth = compute_poly_depth(inv_degree_);
     int total_depth = exp_depth + inv_depth + 2;
+    if (temperature_ != 1.0) total_depth += 1;
 
     if (x.level < total_depth) {
         throw std::runtime_error("SoftmaxLayer: input level too low. Need at least " + to_string(total_depth));
     }
 
-    // 1. Approximate exp(x)
+    // 1. Temperature scaling: x' = x / T
     parallel_for(x.data.size(), th_nums, ctx, [&](ls::CkksContext& ctx_copy, int i) {
-        // exp(x) approximation
+        ls::CkksCiphertext input = x.data[i].copy();
+
+        if (temperature_ != 1.0) {
+            int total_slots = ctx_copy.get_parameter().get_n() / 2;
+            vector<double> temp_values(total_slots, 1.0 / temperature_);
+            ls::CkksPlaintext pt_temp = ctx_copy.encode(temp_values, input.get_level(), input.get_scale());
+            input = ctx_copy.mult_plain(input, pt_temp);
+            input = ctx_copy.rescale(input, input.get_scale());
+        }
+
+        // 2. Approximate exp(x)
         ls::CkksCiphertext exp_x = ctx_copy.poly_eval_function(
             exp_func,
-            x.data[i], exp_range_[0], exp_range_[1], exp_degree_);
+            input, exp_range_[0], exp_range_[1], exp_degree_);
         
         // 2. Sum exp(x_j)
         ls::CkksCiphertext sum_exp = sum_slots(ctx_copy, exp_x);
@@ -116,11 +128,11 @@ Array<double, 1> SoftmaxLayer::run_plaintext(const Array<double, 1>& x) {
     
     double sum_exp = 0.0;
     for (int i = 0; i < size; ++i) {
-        sum_exp += std::exp(x[i]);
+        sum_exp += std::exp(x[i] / temperature_);
     }
 
     for (int i = 0; i < size; ++i) {
-        res.set(i, std::exp(x[i]) / sum_exp);
+        res.set(i, std::exp(x[i] / temperature_) / sum_exp);
     }
 
     return res;

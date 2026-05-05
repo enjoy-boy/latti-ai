@@ -40,10 +40,11 @@ public:
      * @param inv_degree Degree of the polynomial for 1/x.
      * @param n_channel Number of channels in the input.
      * @param n_channel_per_ct Number of channels packed per ciphertext.
+     * @param temperature Temperature scaling factor (1.0 = no scaling).
      */
     SoftmaxLayer(const std::array<double, 2>& exp_range, int exp_degree,
                  const std::array<double, 2>& inv_range, int inv_degree,
-                 int n_channel, int n_channel_per_ct);
+                 int n_channel, int n_channel_per_ct, double temperature = 1.0);
 
     virtual ~SoftmaxLayer();
 
@@ -68,6 +69,7 @@ private:
     int n_channel_;
     int n_channel_per_ct_;
     int n_slots_;
+    double temperature_;
 
     /**
      * @brief Sum elements in a ciphertext across slots.

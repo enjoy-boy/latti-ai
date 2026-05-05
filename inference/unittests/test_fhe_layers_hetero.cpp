@@ -156,6 +156,7 @@ struct SoftmaxTestConfig {
     int init_level;
     std::array<double, 2> exp_range;
     std::array<double, 2> inv_range;
+    double temperature = 1.0;
 };
 
 template <typename T> class HeteroFixture {
@@ -203,61 +204,153 @@ public:
         return result;
     }
 
+    static double eval_poly_plain(double x, const vector<double>& coeffs) {
+        double result = 0.0;
+        double x_pow = 1.0;
+        for (size_t i = 0; i < coeffs.size(); i++) {
+            result += coeffs[i] * x_pow;
+            x_pow *= x;
+        }
+        return result;
+    }
+
+    static vector<double> compute_mapped_poly_coeffs(std::function<double(double)> func, int degree) {
+        int n = degree + 1;
+        vector<double> cheb_coeffs(n, 0.0);
+        for (int j = 0; j < n; j++) {
+            double cj = 0.0;
+            for (int k = 0; k < n; k++) {
+                double theta = M_PI * (2 * k + 1) / (2 * n);
+                double T_j = cos(j * theta);
+                cj += func(cos(theta)) * T_j;
+            }
+            cheb_coeffs[j] = 2.0 / n * cj;
+        }
+        cheb_coeffs[0] /= 2.0;
+
+        vector<double> poly_coeffs(n, 0.0);
+        for (int j = n - 1; j >= 0; j--) {
+            vector<double> Tj(n, 0.0);
+            if (j == 0) { Tj[0] = 1.0; }
+            else if (j == 1) { Tj[1] = 1.0; }
+            else {
+                vector<double> Tprev2(n, 0.0); Tprev2[0] = 1.0;
+                vector<double> Tprev1(n, 0.0); Tprev1[1] = 1.0;
+                for (int i = 2; i <= j; i++) {
+                    Tj.assign(n, 0.0);
+                    for (int p = 1; p < n; p++) Tj[p] += 2.0 * Tprev1[p - 1];
+                    for (int p = 0; p < n - 2; p++) Tj[p] -= Tprev2[p];
+                    Tprev2 = Tprev1; Tprev1 = Tj;
+                }
+            }
+            for (int p = 0; p < n; p++) poly_coeffs[p] += cheb_coeffs[j] * Tj[p];
+        }
+        return poly_coeffs;
+    }
+
     void print_softmax_comparison(const std::string& title, const Array<double, 1>& input_array,
-                                   const Array<double, 1>& expected, const Array<double, 1>& result, int n_channel) {
-        std::cout << "\n========== " << title << " ==========\n";
-        std::cout << std::setw(5) << "Idx"
-                  << std::setw(15) << "Input"
-                  << std::setw(15) << "Expected"
-                  << std::setw(15) << "Actual"
-                  << std::setw(15) << "Error"
-                  << std::setw(15) << "RelError%" << std::endl;
-        std::cout << "--------------------------------------------------------------\n";
+                                   const Array<double, 1>& expected, const Array<double, 1>& result,
+                                   int n_channel, double temperature,
+                                   const std::array<double, 2>& exp_range, int exp_degree,
+                                   const std::array<double, 2>& inv_range, int inv_degree) {
+        Array<double, 1> true_softmax({(uint64_t)n_channel});
+        double sum_exp = 0.0;
+        for (int i = 0; i < n_channel; i++) sum_exp += std::exp(input_array[i]);
+        for (int i = 0; i < n_channel; i++) true_softmax.set(i, std::exp(input_array[i]) / sum_exp);
+
+        double exp_alpha = 2.0 / (exp_range[1] - exp_range[0]);
+        double exp_beta = -(exp_range[0] + exp_range[1]) / (exp_range[1] - exp_range[0]);
+        auto exp_func_mapped = [exp_range](double x_prime) -> double {
+            return std::exp((exp_range[1] - exp_range[0]) / 2 * x_prime + (exp_range[0] + exp_range[1]) / 2);
+        };
+        auto exp_coeffs = compute_mapped_poly_coeffs(exp_func_mapped, exp_degree);
+
+        double inv_alpha = 2.0 / (inv_range[1] - inv_range[0]);
+        double inv_beta = -(inv_range[0] + inv_range[1]) / (inv_range[1] - inv_range[0]);
+        auto inv_func_mapped = [inv_range](double x_prime) -> double {
+            double x = (inv_range[1] - inv_range[0]) / 2 * x_prime + (inv_range[0] + inv_range[1]) / 2;
+            return 1.0 / x;
+        };
+        auto inv_coeffs = compute_mapped_poly_coeffs(inv_func_mapped, inv_degree);
+
+        Array<double, 1> poly_softmax({(uint64_t)n_channel});
+        vector<double> exp_values(n_channel);
+        double poly_sum = 0.0;
+        for (int i = 0; i < n_channel; i++) {
+            double x_scaled = input_array[i] / temperature;
+            double x_prime = exp_alpha * x_scaled + exp_beta;
+            exp_values[i] = eval_poly_plain(x_prime, exp_coeffs);
+            poly_sum += exp_values[i];
+        }
+        double inv_sum_prime = inv_alpha * poly_sum + inv_beta;
+        double inv_sum = eval_poly_plain(inv_sum_prime, inv_coeffs);
+        for (int i = 0; i < n_channel; i++) {
+            poly_softmax.set(i, exp_values[i] * inv_sum);
+        }
+
+        int true_argmax = 0, poly_argmax = 0, actual_argmax = 0;
+        double true_max = true_softmax[0], poly_max = poly_softmax[0], actual_max = result[0];
+        for (int i = 1; i < n_channel; i++) {
+            if (true_softmax[i] > true_max) { true_max = true_softmax[i]; true_argmax = i; }
+            if (poly_softmax[i] > poly_max) { poly_max = poly_softmax[i]; poly_argmax = i; }
+            if (result[i] > actual_max) { actual_max = result[i]; actual_argmax = i; }
+        }
 
         double max_error = 0.0;
         int max_error_idx = -1;
-        double max_abs = 0.0;
-        double sum_sq_error = 0.0;
-        double sum_sq_expected = 0.0;
-
+        double sum_sq_error = 0.0, sum_sq_expected = 0.0;
         for (int i = 0; i < n_channel; i++) {
-            double input_val = input_array[i];
-            double expected_val = expected[i];
-            double actual_val = result[i];
-            double error = std::abs(expected_val - actual_val);
-            double rel_error = (expected_val != 0) ? (error / std::abs(expected_val) * 100) :
-                               (actual_val != 0 ? 100 : 0);
-
+            double error = std::abs(expected[i] - result[i]);
             sum_sq_error += error * error;
-            sum_sq_expected += expected_val * expected_val;
-
-            if (error > max_error) {
-                max_error = error;
-                max_error_idx = i;
-            }
-            if (std::abs(expected_val) > max_abs) {
-                max_abs = std::abs(expected_val);
-            }
-
-            std::cout << std::setw(5) << i
-                      << std::setw(15) << std::fixed << std::setprecision(6) << input_val
-                      << std::setw(15) << expected_val
-                      << std::setw(15) << actual_val
-                      << std::setw(15) << error
-                      << std::setw(14) << std::setprecision(2) << rel_error << "%" << std::endl;
+            sum_sq_expected += expected[i] * expected[i];
+            if (error > max_error) { max_error = error; max_error_idx = i; }
         }
-
-        std::cout << "--------------------------------------------------------------\n";
         double rmse = std::sqrt(sum_sq_error / n_channel);
         double rms = std::sqrt(sum_sq_expected / n_channel);
 
-        std::cout << "Statistics:\n";
-        std::cout << "  max_error=" << max_error << " at index[" << max_error_idx << "]\n";
-        std::cout << "  max_abs=" << max_abs << std::endl;
-        std::cout << "  rmse=" << rmse << std::endl;
-        std::cout << "  rms=" << rms << std::endl;
-        std::cout << "  max_error/max_abs=" << (max_error / max_abs * 100) << "%\n";
-        std::cout << "  rmse/rms=" << (rmse / rms * 100) << "%\n";
+        std::cout << "\n========== " << title << " ==========\n";
+        if (temperature != 1.0)
+            std::cout << "  Temperature T=" << temperature << " (Poly/FHE compute softmax(x/T), True computes softmax(x))\n";
+
+        std::cout << std::setw(5) << "Cls"
+                  << std::setw(10) << "Input"
+                  << std::setw(15) << "True"
+                  << std::setw(15) << "Target"
+                  << std::setw(15) << "Poly"
+                  << std::setw(15) << "FHE"
+                  << std::setw(12) << "Poly_Err%"
+                  << std::setw(12) << "FHE_Err%"
+                  << std::setw(10) << "True%"
+                  << std::setw(10) << "Poly%" << "\n";
+        std::cout << "-------------------------------------------------------------------------------------------------------------------\n";
+        for (int i = 0; i < n_channel; i++) {
+            double poly_rel_err = (expected[i] != 0) ? std::abs(poly_softmax[i] - expected[i]) / expected[i] * 100 : 0;
+            double fhe_rel_err = (expected[i] != 0) ? std::abs(result[i] - expected[i]) / expected[i] * 100 : 0;
+            std::string marker = (i == true_argmax && i == poly_argmax && i == actual_argmax) ? " <<<" :
+                                 (i == true_argmax && i == poly_argmax) ? " <TP" :
+                                 (i == true_argmax && i == actual_argmax) ? " <TF" :
+                                 (i == poly_argmax && i == actual_argmax) ? " <PF" :
+                                 (i == true_argmax) ? " <T" :
+                                 (i == poly_argmax) ? " <P" :
+                                 (i == actual_argmax) ? " <F" : "";
+            std::cout << std::setw(5) << i
+                      << std::setw(10) << std::fixed << std::setprecision(4) << input_array[i]
+                      << std::setw(15) << std::setprecision(6) << true_softmax[i]
+                      << std::setw(15) << expected[i]
+                      << std::setw(15) << poly_softmax[i]
+                      << std::setw(15) << result[i]
+                      << std::setw(11) << std::setprecision(2) << poly_rel_err << "%"
+                      << std::setw(11) << fhe_rel_err << "%"
+                      << std::setw(9) << std::setprecision(2) << true_softmax[i] * 100 << "%"
+                      << std::setw(9) << poly_softmax[i] * 100 << "%" << marker << "\n";
+        }
+        std::cout << "-------------------------------------------------------------------------------------------------------------------\n";
+        std::cout << "  True class=" << true_argmax << " (prob=" << std::fixed << std::setprecision(6) << true_max << " = " << std::setprecision(2) << true_max * 100 << "%)"
+                  << ", Poly class=" << poly_argmax << " (prob=" << std::setprecision(6) << poly_max << " = " << std::setprecision(2) << poly_max * 100 << "%)"
+                  << ", FHE class=" << actual_argmax << " (prob=" << std::setprecision(6) << actual_max << " = " << std::setprecision(2) << actual_max * 100 << "%)"
+                  << ", Match=" << (true_argmax == poly_argmax && true_argmax == actual_argmax ? "ALL" : true_argmax == actual_argmax ? "FHE" : true_argmax == poly_argmax ? "POLY" : "NONE") << "\n";
+        std::cout << "  FHE vs Target: rmse/rms=" << std::setprecision(2) << (rmse / rms * 100) << "%"
+                  << ", max_error=" << std::setprecision(6) << max_error << " at [" << max_error_idx << "]\n";
         std::cout << "==============================================================\n\n";
     }
 
@@ -267,7 +360,7 @@ public:
         int exp_degree = 7;
         int inv_degree = 7;
 
-        SoftmaxLayer softmax(config.exp_range, exp_degree, config.inv_range, inv_degree, n_channel, n_channel);
+        SoftmaxLayer softmax(config.exp_range, exp_degree, config.inv_range, inv_degree, n_channel, n_channel, config.temperature);
 
         Feature0DEncrypted input_feature(&context, config.init_level);
         input_feature.n_channel = n_channel;
@@ -291,7 +384,8 @@ public:
         Array<double, 1> expected = softmax.run_plaintext(input_array);
 
         std::cout << "Input range: [-" << config.input_range_scale << ", " << config.input_range_scale << "]\n";
-        print_softmax_comparison("Softmax Layer Test: " + config.name, input_array, expected, result, n_channel);
+        print_softmax_comparison("Softmax Layer Test: " + config.name, input_array, expected, result, n_channel, config.temperature,
+                                 config.exp_range, exp_degree, config.inv_range, inv_degree);
 
         auto compare_result = compare(expected, result);
         REQUIRE(compare_result.max_error < 0.30 * compare_result.max_abs);
@@ -370,9 +464,17 @@ public:
         auto inv_coeffs = compute_mapped_poly_coeffs(inv_func_mapped, inv_degree);
 
         vector<vector<CkksPlaintextRingt>> pt_ringt_args;
-        pt_ringt_args.reserve(2 + exp_degree + 1 + 1 + 2 + inv_degree + 1);
+        pt_ringt_args.reserve(1 + 2 + exp_degree + 1 + 1 + 2 + inv_degree + 1);
 
         map<string, int> pt_ringt_idx_map;
+
+        if (config.temperature != 1.0) {
+            vector<double> slot_values(total_slots, 1.0 / config.temperature);
+            vector<CkksPlaintextRingt> pt_vec;
+            pt_vec.push_back(this->context.encode_ringt(slot_values, default_scale));
+            pt_ringt_idx_map["sm_0_temp"] = (int)pt_ringt_args.size();
+            pt_ringt_args.push_back(std::move(pt_vec));
+        }
 
         {
             vector<double> slot_values(total_slots, exp_alpha);
@@ -433,13 +535,14 @@ public:
             pt_ringt_args.push_back(std::move(pt_vec));
         }
 
-        SoftmaxLayer softmax(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel);
+        SoftmaxLayer softmax(exp_range, exp_degree, inv_range, inv_degree, n_channel, n_channel, config.temperature);
 
         Feature0DEncrypted input_feature(&this->context, init_level);
         input_feature.pack(input_array, false, this->param.get_default_scale());
 
         int output_level = init_level - (exp_degree > 1 ? (int)ceil(log2(exp_degree)) : 0)
-                                    - (inv_degree > 1 ? (int)ceil(log2(inv_degree)) : 0) - 4;
+                                    - (inv_degree > 1 ? (int)ceil(log2(inv_degree)) : 0) - 4
+                                    - (config.temperature != 1.0 ? 1 : 0);
         Feature0DEncrypted output_feature(&this->context, output_level);
         output_feature.skip = input_feature.skip;
         output_feature.n_channel = input_feature.n_channel;
@@ -447,7 +550,8 @@ public:
         output_feature.data.push_back(
             this->context.new_ciphertext(output_level, this->param.get_default_scale()));
 
-        fs::path project_path = base_path / ("CKKS_softmax_" + config.name + "_" + to_string(n_channel)) /
+        fs::path softmax_base_path = "./build/inference/hetero";
+        fs::path project_path = softmax_base_path / ("CKKS_softmax_" + config.name + "_" + to_string(n_channel)) /
                                 ("level_" + to_string(init_level)) / "server";
         cout << "project_path=" << project_path << endl;
 
@@ -476,7 +580,8 @@ public:
         Array<double, 1> result = output_feature.unpack();
         Array<double, 1> expected = softmax.run_plaintext(input_array);
 
-        this->print_softmax_comparison("Softmax Graph Gen Test: " + config.name, input_array, expected, result, n_channel);
+        this->print_softmax_comparison("Softmax Graph Gen Test: " + config.name, input_array, expected, result, n_channel, config.temperature,
+                                       exp_range, exp_degree, inv_range, inv_degree);
 
         auto compare_result = compare(expected, result);
         REQUIRE(compare_result.max_error < 0.30 * compare_result.max_abs);
@@ -2917,28 +3022,56 @@ TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "softmax_layer", "", HeteroProcess
             0.5,
             12,
             {-1.0, 1.0},
-            {5.0, 30.0}
+            {5.0, 30.0},
+            1.0
         },
         {
             "range_1.0",
             1.0,
             12,
             {-2.0, 2.0},
-            {5.0, 50.0}
+            {5.0, 50.0},
+            1.0
         },
         {
-            "range_1.5",
+            "range_1.5_T1.5",
             1.5,
             12,
-            {-2.5, 2.5},
-            {3.0, 80.0}
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            1.5
         },
         {
-            "range_2.0",
+            "range_2.0_T1",
             2.0,
             12,
-            {-3.0, 3.0},
-            {2.0, 130.0}
+            {-2.0, 2.0},
+            {2.0, 120.0},
+            1.0
+        },
+        {
+            "range_2.0_T2",
+            2.0,
+            12,
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            2.0
+        },
+        {
+            "range_8.0_T1",
+            8.0,
+            12,
+            {-8.0, 8.0},
+            {0.001, 50000.0},
+            1.0
+        },
+        {
+            "range_8.0_T8",
+            8.0,
+            12,
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            8.0
         },
     };
 
@@ -3084,28 +3217,56 @@ TEMPLATE_LIST_TEST_CASE_METHOD(HeteroFixture, "softmax_layer_graph_gen", "", Het
             0.5,
             12,
             {-1.0, 1.0},
-            {5.0, 30.0}
+            {5.0, 30.0},
+            1.0
         },
         {
             "range_1.0",
             1.0,
             12,
             {-2.0, 2.0},
-            {5.0, 50.0}
+            {5.0, 50.0},
+            1.0
         },
         {
-            "range_1.5",
+            "range_1.5_T1.5",
             1.5,
             12,
-            {-2.5, 2.5},
-            {3.0, 80.0}
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            1.5
         },
         {
-            "range_2.0",
+            "range_2.0_T1",
             2.0,
             12,
-            {-3.0, 3.0},
-            {2.0, 130.0}
+            {-2.0, 2.0},
+            {2.0, 120.0},
+            1.0
+        },
+        {
+            "range_2.0_T2",
+            2.0,
+            12,
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            2.0
+        },
+        {
+            "range_8.0_T1",
+            8.0,
+            12,
+            {-8.0, 8.0},
+            {0.001, 50000.0},
+            1.0
+        },
+        {
+            "range_8.0_T8",
+            8.0,
+            12,
+            {-1.0, 1.0},
+            {5.0, 30.0},
+            8.0
         },
     };
 
