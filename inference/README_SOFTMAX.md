@@ -250,9 +250,8 @@ python3 -m unittest inference.unittests.test_gen_layers.TestLayerExport.test_sof
 python3 -m unittest inference.unittests.test_gen_layers.TestLayerExport.test_softmax_graph_gen -v
 
 # C++ 端
-cd build
-./inference/unittests/test_fhe_layers_hetero "*softmax_layer*"
-./inference/unittests/test_fhe_layers_hetero "*softmax_layer_graph_gen*"
+./build/inference/unittests/test_fhe_layers_hetero "*softmax_layer*"
+./build/inference/unittests/test_fhe_layers_hetero "*softmax_layer_graph_gen*"
 ```
 
 ***
